@@ -1,0 +1,1776 @@
+/**
+ * PENTING: Ganti nilai GAS_API_URL di bawah ini dengan URL Deployment Web App Google Apps Script Anda.
+ * Pastikan akses deployment Web App diatur menjadi "Anyone" (Siapa Saja).
+ */
+const GAS_API_URL = "ISI_DENGAN_URL_WEB_APP_GOOGLE_APPS_SCRIPT_ANDA_DISINI";
+
+async function callGasApi(action, payload = {}) {
+  payload.action = action;
+  try {
+    const response = await fetch(GAS_API_URL, {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+    
+    // GAS terkadang merespon dengan text/html jika error eksekusi terjadi, 
+    // makanya JSON parser butuh dilindungi.
+    const result = await response.json(); 
+    return result;
+  } catch (error) {
+    console.error("API Error:", error);
+    throw error;
+  }
+}
+
+const DEFAULT_LOGO_SVG = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><circle cx='50' cy='50' r='48' fill='%2315803d'/><circle cx='50' cy='50' r='42' fill='%23ffffff'/><circle cx='50' cy='50' r='38' fill='%23166534'/><path d='M50 20 L53 28 L62 28 L55 33 L57 41 L50 36 L43 41 L45 33 L38 28 L47 28 Z' fill='%23eab308'/><path d='M30 65 Q50 50 70 65 Q50 60 30 65 Z' fill='%23ffffff'/><path d='M32 68 Q50 55 68 68 Q50 62 32 68 Z' fill='%23eab308'/><text x='50' y='78' font-family='sans-serif' font-size='10' font-weight='bold' fill='%23ffffff' text-anchor='middle'>MDU</text></svg>";
+
+function formatImageUrl(url) {
+  if (!url || !url.trim()) return DEFAULT_LOGO_SVG;
+  let trimmed = url.trim();
+  const driveMatch = trimmed.match(/\/file\/d\/([^\/]+)/) || trimmed.match(/id=([^&]+)/);
+  if (driveMatch && (trimmed.includes('drive.google.com') || trimmed.includes('docs.google.com'))) {
+    return 'https://lh3.googleusercontent.com/d/' + driveMatch[1];
+  }
+  return trimmed;
+}
+
+function handleLogoError(imgElem) {
+  if (imgElem && !imgElem.getAttribute('data-fallback-applied')) {
+    imgElem.setAttribute('data-fallback-applied', 'true');
+    imgElem.src = DEFAULT_LOGO_SVG;
+  }
+}
+
+const INDO_MONTHS_MAP = {
+  "Januari": 0, "Februari": 1, "Maret": 2, "April": 3, "Mei": 4, "Juni": 5,
+  "Juli": 6, "Agustus": 7, "September": 8, "Oktober": 9, "November": 10, "Desember": 11
+};
+
+const MONTH_NAMES_ARRAY = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+
+const DUMMY_DATA_RELASED = [
+  { id: "DUI01", guru: "Ustadz Fatur Rohman", bank: "BSI", rekening: "7266276518", wa: "081234567801", jamPerpekanMaster: 36, jamPerpekan: 36, jamMengajar: 78, jumlahHadir: 40, sakit: 0, izin: 0, alpa: 0, piket: 0, rapat: 0, telat: 0, totalBisyaroh: 900000, persentaseHadir: "51%", status: "Belum Dibayar" },
+  { id: "DUI02", guru: "Ustadz Febri Handoko", bank: "BRI", rekening: "12341237123", wa: "081234567802", jamPerpekanMaster: 30, jamPerpekan: 30, jamMengajar: 66, jumlahHadir: 20, sakit: 0, izin: 0, alpa: 40, piket: 0, rapat: 1, telat: 2, totalBisyaroh: 411000, persentaseHadir: "30%", status: "Belum Dibayar" }
+];
+
+let globalDatabase = [];
+let attendanceLogsToday = []; // Array menampung log scan yang difilter per bulan & tahun aktif
+let appSettings = {
+  namaLembaga: "Madrasah Darul Ulum Indragiri",
+  alamatLembaga: "Jl. Pesantren, Kmp. Pulau, Kec. Rengat, Kab. Indragiri Hulu, Riau",
+  namaAdmin: "M. Ainur Rofiq",
+  inisialAdmin: "AR",
+  logoUrl: "https://placehold.co/100x100/2563eb/ffffff?text=MDU",
+  fotoAdminUrl: "",
+  tarifHadir: 22500,
+  tarifSakit: 11250,
+  tarifTelat: 7000,
+  namaSekretaris: "(UST. M. AINUR ROFIQ)",
+  namaBendahara: "(UST. TENGKU JALALUDDIN GHAZALI)",
+  namaWakamad: "(UST. GILANG MOHAMMAD)",
+  namaKamad: "(UST. FATURRAHMAN)",
+  namaPimpinan: "(KIAI MOH. NASIRUDDIN ABBAS)"
+};
+
+window.onbeforeprint = function() {
+  window._originalTitle = document.title;
+  document.title = "";
+};
+window.onafterprint = function() {
+  document.title = window._originalTitle;
+};
+
+window.onload = function() {
+  switchMenu('dashboard');
+  
+  const now = new Date();
+  const currentMonthName = MONTH_NAMES_ARRAY[now.getMonth()];
+  const currentYearStr = now.getFullYear().toString();
+
+  const selectMonthElem = document.getElementById('header-month');
+  const selectYearElem = document.getElementById('header-year');
+  if (selectMonthElem) selectMonthElem.value = currentMonthName;
+  if (selectYearElem) selectYearElem.value = currentYearStr;
+
+  if (sessionStorage.getItem('mdu_logged_in') === 'true') {
+    const loginContainer = document.getElementById('login-container');
+    if (loginContainer) loginContainer.classList.add('hidden');
+  }
+
+  const cachedSettings = localStorage.getItem('mdu_settings_cache');
+  const cachedDB = localStorage.getItem('mdu_db_cache');
+
+  if (cachedSettings) {
+    appSettings = Object.assign({}, appSettings, JSON.parse(cachedSettings));
+    syncSettingsToUI(appSettings);
+  } else {
+    syncSettingsToUI(appSettings);
+  }
+
+  if (cachedDB) {
+    globalDatabase = JSON.parse(cachedDB);
+    recalculateAllBisyarohInMemory();
+    renderAllTablesAndCharts();
+  } else {
+    globalDatabase = [...DUMMY_DATA_RELASED];
+    recalculateAllBisyarohInMemory();
+    renderAllTablesAndCharts();
+  }
+
+  syncCalendarView(); 
+  updateRapatStatistics();
+};
+
+function calculateFormattedPercentage(currentVal, maxVal) {
+  if (!maxVal || maxVal <= 0) return "0%";
+  const rawVal = (currentVal / maxVal) * 100;
+  const roundedVal = Math.round(rawVal);
+  return roundedVal + "%";
+}
+
+function recalculateAllBisyarohInMemory() {
+  globalDatabase.forEach(item => {
+    let baseHadir = (Number(item.jamMengajar) || 0) - ((Number(item.sakit) || 0) + (Number(item.izin) || 0) + (Number(item.alpa) || 0));
+    if (baseHadir < 0) baseHadir = 0;
+    const totalH = baseHadir + (Number(item.piket) || 0);
+    item.jumlahHadir = totalH;
+
+    const dendaRapat = (Number(item.rapat) || 0) * 25000;
+    const dendaTelat = (Number(item.telat) || 0) * appSettings.tarifTelat;
+    let calBisyaroh = (totalH * appSettings.tarifHadir) + ((Number(item.sakit) || 0) * appSettings.tarifSakit) - dendaRapat - dendaTelat;
+    if (calBisyaroh < 0) calBisyaroh = 0;
+    
+    item.totalBisyaroh = calBisyaroh;
+    if (Number(item.jamMengajar) > 0) {
+      item.persentaseHadir = calculateFormattedPercentage(totalH, Number(item.jamMengajar));
+    } else {
+      item.persentaseHadir = "0%";
+    }
+  });
+}
+
+function handleLogin() {
+  const userInput = document.getElementById('login-username');
+  const passInput = document.getElementById('login-password');
+  if (!userInput || !passInput) return;
+
+  const u = userInput.value.trim();
+  const p = passInput.value.trim();
+
+  if (!u || !p) {
+    showToast("Isi username dan password terlebih dahulu!");
+    return;
+  }
+
+  // Backup fallback lokal
+  if (u.toLowerCase() === "ainurrofiq" && p === "14361514") {
+    executeLoginSuccess();
+    return;
+  }
+
+  callGasApi('verifyLogin', { username: u, password: p })
+    .then(res => {
+      if (res && res.success) {
+        executeLoginSuccess();
+      } else {
+        showToast((res && res.error) ? res.error : "Username atau Password salah!");
+      }
+    })
+    .catch(err => {
+      showToast("Gagal memvalidasi API: " + (err.message || "Pastikan URL GAS sudah benar."));
+    });
+}
+
+function executeLoginSuccess() {
+  sessionStorage.setItem('mdu_logged_in', 'true');
+  const loginContainer = document.getElementById('login-container');
+  if (loginContainer) {
+    loginContainer.classList.add('opacity-0', 'pointer-events-none');
+    setTimeout(() => {
+      loginContainer.classList.add('hidden');
+    }, 300);
+  }
+  showToast("Selamat Datang! Login Berhasil.");
+}
+
+function toggleLoginPassword() {
+  const passField = document.getElementById('login-password');
+  const eyeIcon = document.getElementById('eye-icon');
+  if (passField.type === 'password') {
+    passField.type = 'text';
+    eyeIcon.className = 'fa-regular fa-eye text-slate-400 cursor-pointer';
+  } else {
+    passField.type = 'password';
+    eyeIcon.className = 'fa-regular fa-eye-slash text-slate-400 cursor-pointer';
+  }
+}
+
+function switchMenu(menuName) {
+  document.querySelectorAll('section[id^="menu-section-"]').forEach(sec => sec.classList.add('hidden'));
+  document.querySelectorAll('.sidebar-link').forEach(btn => btn.classList.remove('sidebar-active'));
+  
+  const targetSec = document.getElementById(`menu-section-${menuName}`);
+  const targetBtn = document.getElementById(`btn-menu-${menuName}`);
+  
+  if(targetSec) targetSec.classList.remove('hidden');
+  if(targetBtn) targetBtn.classList.add('sidebar-active');
+
+  ['dashboard', 'guru', 'input', 'rapat', 'indisipliner', 'bisyaroh', 'pengaturan'].forEach(m => {
+    const mBtn = document.getElementById(`mobile-btn-${m}`);
+    if (mBtn) {
+      if (m === menuName) {
+        mBtn.className = "flex flex-col items-center justify-center py-1 px-3 text-violet-400 font-bold transition-all";
+      } else {
+        mBtn.className = "flex flex-col items-center justify-center py-1 px-3 text-slate-400 font-bold transition-all";
+      }
+    }
+  });
+}
+
+function renderDashboard(data) {
+  let totalGuru = data.length;
+  let totalJam = 0;
+  let totalBisyaroh = 0;
+
+  data.forEach(item => {
+    totalJam += Number(item.jamMengajar) || 0;
+    totalBisyaroh += Number(item.totalBisyaroh) || 0;
+  });
+
+  const totalGuruElem = document.getElementById('dash-total-guru');
+  const totalJamElem = document.getElementById('dash-total-jam');
+  const totalBisyarohElem = document.getElementById('dash-total-bisyaroh');
+
+  if (totalGuruElem) totalGuruElem.innerText = totalGuru;
+  if (totalJamElem) totalJamElem.innerText = totalJam;
+  if (totalBisyarohElem) totalBisyarohElem.innerText = "Rp " + totalBisyaroh.toLocaleString('id-ID');
+}
+
+function renderAllTablesAndCharts() {
+  renderDashboard(globalDatabase);
+  renderTeacherList(globalDatabase);
+  renderInputTable(globalDatabase);
+  renderBisyarohTable(globalDatabase);
+  populateTeacherSelectOptions(globalDatabase);
+  renderDashboardChart(globalDatabase);
+  renderDonutChart(globalDatabase);
+  renderSettingsJamPerpekanTable(globalDatabase);
+  renderIndisiplinerTable(globalDatabase);
+  updateRapatStatistics();
+}
+
+function refreshAllData() {
+  const selectedMonth = document.getElementById('header-month').value;
+  const selectedYear = document.getElementById('header-year').value;
+
+  // Lakukan pemanggilan API secara berantai (Settings -> Data)
+  callGasApi('getSettings')
+    .then(settings => {
+      if (settings) {
+        appSettings = settings;
+        localStorage.setItem('mdu_settings_cache', JSON.stringify(appSettings));
+        syncSettingsToUI(appSettings);
+      }
+      return callGasApi('getData', { bulan: selectedMonth, tahun: selectedYear });
+    })
+    .then(data => {
+      if (data && data.length > 0) {
+        globalDatabase = data;
+        recalculateAllBisyarohInMemory();
+        localStorage.setItem('mdu_db_cache', JSON.stringify(globalDatabase));
+        renderAllTablesAndCharts();
+      }
+    })
+    .catch(err => {
+      console.warn("Silent sync error: " + err.message);
+    });
+}
+
+function syncSettingsToUI(settings) {
+  document.getElementById('instansi-title').innerText = settings.namaLembaga;
+  document.getElementById('instansi-address').innerText = settings.alamatLembaga;
+  document.getElementById('profile-name').innerText = settings.namaAdmin;
+  document.getElementById('profile-initial').innerText = settings.inisialAdmin;
+  document.getElementById('dash-tarif-jam').innerText = "Rp " + Number(settings.tarifHadir).toLocaleString('id-ID');
+  
+  const headerLogo = document.getElementById('instansi-logo');
+  const loginLogo = document.getElementById('login-logo');
+  const printLogo = document.getElementById('print-instansi-logo');
+  
+  const logoSrc = formatImageUrl(settings.logoUrl);
+  
+  [headerLogo, loginLogo, printLogo].forEach(img => {
+    if (img) {
+      img.removeAttribute('data-fallback-applied');
+      img.src = logoSrc;
+    }
+  });
+
+  const loginAdminName = document.getElementById('login-welcome-admin');
+  const loginAuthor = document.getElementById('login-quote-author');
+  if (loginAdminName) loginAdminName.innerText = settings.namaAdmin;
+  if (loginAuthor) loginAuthor.innerText = "(" + settings.namaAdmin + ")";
+
+  const profileInitial = document.getElementById('profile-initial');
+  const profilePic = document.getElementById('profile-pic');
+  const loginAdminPic = document.getElementById('login-admin-photo');
+
+  if (settings.fotoAdminUrl && settings.fotoAdminUrl.trim() !== "") {
+    if (profilePic) {
+      profilePic.src = settings.fotoAdminUrl;
+      profilePic.classList.remove('hidden');
+    }
+    if (profileInitial) profileInitial.classList.add('hidden');
+    if (loginAdminPic) {
+      loginAdminPic.src = settings.fotoAdminUrl;
+      loginAdminPic.classList.remove('hidden');
+    }
+  } else {
+    if (profilePic) {
+      profilePic.src = "";
+      profilePic.classList.add('hidden');
+    }
+    if (profileInitial) profileInitial.classList.remove('hidden');
+    if (loginAdminPic) {
+      loginAdminPic.src = "";
+      loginAdminPic.classList.add('hidden');
+    }
+  }
+
+  const loginInst = document.getElementById('login-institution-title');
+  if (loginInst) loginInst.innerText = settings.namaLembaga;
+
+  const printTitle = document.getElementById('print-instansi-title');
+  const printAddress = document.getElementById('print-instansi-address');
+  if (printTitle) printTitle.innerText = settings.namaLembaga;
+  if (printAddress) printAddress.innerText = settings.alamatLembaga;
+
+  document.getElementById('set-nama-lembaga').value = settings.namaLembaga;
+  document.getElementById('set-alamat-lembaga').value = settings.alamatLembaga;
+  document.getElementById('set-nama-admin').value = settings.namaAdmin;
+  document.getElementById('set-inisial-admin').value = settings.inisialAdmin;
+  document.getElementById('set-logo-url').value = settings.logoUrl;
+  document.getElementById('set-foto-admin-url').value = settings.fotoAdminUrl || "";
+  document.getElementById('set-tarif-hadir').value = settings.tarifHadir;
+  document.getElementById('set-tarif-sakit').value = settings.tarifSakit;
+  document.getElementById('set-tarif-telat').value = settings.tarifTelat || 7000;
+
+  document.getElementById('set-nama-sekretaris').value = settings.namaSekretaris || "";
+  document.getElementById('set-nama-bendahara').value = settings.namaBendahara || "";
+  document.getElementById('set-nama-wakamad').value = settings.namaWakamad || "";
+  document.getElementById('set-nama-kamad').value = settings.namaKamad || "";
+  document.getElementById('set-nama-pimpinan').value = settings.namaPimpinan || "";
+
+  const pSekretaris = document.getElementById('print-nama-sekretaris');
+  const pBendahara = document.getElementById('print-nama-bendahara');
+  const pWakamad = document.getElementById('print-nama-wakamad');
+  const pKamad = document.getElementById('print-nama-kamad');
+  const pPimpinan = document.getElementById('print-nama-pimpinan');
+
+  if (pSekretaris) pSekretaris.innerText = settings.namaSekretaris || "-";
+  if (pBendahara) pBendahara.innerText = settings.namaBendahara || "-";
+  if (pWakamad) pWakamad.innerText = settings.namaWakamad || "-";
+  if (pKamad) pKamad.innerText = settings.namaKamad || "-";
+  if (pPimpinan) pPimpinan.innerText = settings.namaPimpinan || "-";
+
+  const dynLembagaElems = document.querySelectorAll('.dyn-lembaga-name');
+  dynLembagaElems.forEach(el => el.innerText = settings.namaLembaga);
+}
+
+function populateTeacherSelectOptions(data) {
+  const select = document.getElementById('in-guru-select');
+  if (!select) return;
+  select.innerHTML = '<option value="" class="bg-[#151c2e] text-white">-- Pilih Anggota Guru --</option>';
+  data.forEach(item => {
+    const opt = document.createElement('option');
+    opt.value = `${item.id}|${item.guru}`;
+    opt.className = "bg-[#151c2e] text-white";
+    opt.innerText = `${item.guru} (${item.id})`;
+    select.appendChild(opt);
+  });
+}
+
+function handleLogout() {
+  sessionStorage.removeItem('mdu_logged_in');
+  const loginContainer = document.getElementById('login-container');
+  if (loginContainer) {
+    loginContainer.classList.remove('hidden', 'pointer-events-none');
+    setTimeout(() => {
+      loginContainer.classList.remove('opacity-0');
+    }, 50);
+  }
+  showToast("Anda telah keluar dari portal admin.");
+}
+
+function renderDashboardChart(data) {
+  const container = document.getElementById('dashboard-chart-container');
+  const yAxisContainer = document.getElementById('chart-y-axis');
+  const selectedMonth = document.getElementById('header-month').value;
+  const selectedYear = document.getElementById('header-year').value;
+  
+  document.getElementById('chart-title').innerText = `Kehadiran Guru (${selectedMonth} - ${selectedYear})`;
+  container.innerHTML = '';
+  if (yAxisContainer) yAxisContainer.innerHTML = '';
+
+  if (data.length === 0) {
+    container.innerHTML = `<span class="text-slate-500 text-xs font-semibold self-center mx-auto">Belum ada aktivitas terekam</span>`;
+    return;
+  }
+
+  const maxVal = Math.max(...data.map(item => Math.max(Number(item.jamMengajar) || 0, Number(item.jumlahHadir) || 0)), 100);
+
+  if (yAxisContainer) {
+    const step = maxVal / 4;
+    for (let i = 4; i >= 0; i--) {
+      const valLabel = Math.round(step * i);
+      const labelDiv = document.createElement('div');
+      labelDiv.className = "leading-none flex items-center justify-end h-0 font-extrabold text-[9px] text-slate-500";
+      labelDiv.innerText = valLabel;
+      yAxisContainer.appendChild(labelDiv);
+    }
+  }
+
+  const chartMaxHeightPx = 160;
+  const scaleFactor = chartMaxHeightPx / maxVal;
+
+  data.forEach(item => {
+    const targetJam = Number(item.jamMengajar) || 0;
+    const realHadir = Number(item.jumlahHadir) || 0;
+
+    const hTarget = Math.max(targetJam * scaleFactor, 4);
+    const hHadir = Math.max(realHadir * scaleFactor, 4);
+
+    let shortCallName = '';
+    const lowerGuru = item.guru.toLowerCase();
+    
+    if (lowerGuru.includes('nur kholis')) {
+      shortCallName = 'Kholis';
+    } else if (lowerGuru.includes('said eri')) {
+      shortCallName = 'Eri';
+    } else {
+      const nameCleaned = item.guru.replace(/^(Ustadz|Ustadzah|Ust\.|Ust|Kiai|Ky\.|Khai)\s+/i, '').trim();
+      const parts = nameCleaned.split(/\s+/);
+      const skipPrefixes = ['M.', 'M', 'A.', 'A', 'Moh.', 'Moh', 'Moch.', 'Moch', 'Muhammad', 'Ahmad', 'Nur', 'Said'];
+      
+      for (let i = 0; i < parts.length; i++) {
+        let p = parts[i];
+        let pClean = p.replace(/\./g, '');
+        if (skipPrefixes.includes(p) || skipPrefixes.includes(pClean)) {
+          if (i < parts.length - 1) continue;
+        }
+        if (pClean.length > 0) {
+          shortCallName = pClean;
+          break;
+        }
+      }
+      if (!shortCallName) shortCallName = parts[0] || item.guru;
+    }
+
+    const col = document.createElement('div');
+    col.className = "flex flex-col items-center shrink-0 group cursor-pointer px-1";
+    
+    col.innerHTML = `
+      <div class="flex items-end gap-1 h-[170px] pb-1 border-b border-white/5">
+        <div class="w-3 sm:w-3.5 bg-violet-600 rounded-t-sm transition-all duration-300 hover:bg-violet-400 hover:scale-105 shadow-sm shadow-violet-600/50" style="height: ${hTarget}px;" title="Target Mengajar (${item.guru}): ${targetJam} Jam"></div>
+        <div class="w-3 sm:w-3.5 bg-amber-500 rounded-t-sm transition-all duration-300 hover:bg-amber-400 hover:scale-105 shadow-sm shadow-amber-500/50" style="height: ${hHadir}px;" title="Realisasi Hadir (${item.guru}): ${realHadir} Jam"></div>
+      </div>
+      <span class="text-[8px] sm:text-[9px] font-bold text-slate-300 mt-1.5 truncate max-w-[56px] text-center" title="${item.guru}">${shortCallName}</span>
+      <span class="text-[8px] sm:text-[9px] text-slate-400 font-bold">${realHadir} Jam</span>
+    `;
+    container.appendChild(col);
+  });
+}
+
+function renderDonutChart(data) {
+  const svgContainer = document.getElementById('donut-chart-svg');
+  const legendContainer = document.getElementById('donut-legend-container');
+  const totalValElem = document.getElementById('donut-total-val');
+  
+  if (!svgContainer || !legendContainer) return;
+
+  let tHadir = 0, tPiket = 0, tSakit = 0, tIzin = 0, tAlpa = 0;
+  let totalGuruTelat = 0;
+  
+  data.forEach(item => {
+    const piket = Number(item.piket) || 0;
+    tPiket += piket;
+    tHadir += Math.max(0, (Number(item.jumlahHadir) || 0) - piket);
+    tSakit += Number(item.sakit) || 0;
+    tIzin += Number(item.izin) || 0;
+    tAlpa += Number(item.alpa) || 0;
+    
+    if (Number(item.telat) > 0) {
+      totalGuruTelat++;
+    }
+  });
+
+  const grandTotal = tHadir + tPiket + tSakit + tIzin + tAlpa;
+  
+  if (totalValElem) totalValElem.innerText = grandTotal + " Jam";
+
+  if (grandTotal === 0) {
+    svgContainer.innerHTML = `<circle cx="50" cy="50" r="38" fill="none" stroke="#1e293b" stroke-width="12" />`;
+    legendContainer.innerHTML = `<p class="text-slate-500 text-xs italic">Belum ada data absensi</p>`;
+    return;
+  }
+
+  const categories = [
+    { label: "Hadir Efektif", short: "Hadir", val: tHadir, color: "#8b5cf6", bgClass: "bg-violet-950/40 text-violet-300 border-violet-500/30" },
+    { label: "Piket Tambahan", short: "Piket", val: tPiket, color: "#10b981", bgClass: "bg-emerald-950/40 text-emerald-300 border-emerald-500/30" },
+    { label: "Sakit Hari", short: "Sakit", val: tSakit, color: "#f59e0b", bgClass: "bg-amber-950/40 text-amber-300 border-amber-500/30" },
+    { label: "Izin Hari", short: "Izin", val: tIzin, color: "#06b6d4", bgClass: "bg-cyan-950/40 text-cyan-300 border-cyan-500/30" },
+    { label: "Alpa / Tanpa Ket.", short: "Alpa", val: tAlpa, color: "#f43f5e", bgClass: "bg-rose-950/40 text-rose-300 border-rose-500/30" }
+  ];
+
+  const r = 38;
+  const circumference = 2 * Math.PI * r;
+  let accumulatedOffset = 0;
+  let svgContent = `<circle cx="50" cy="50" r="${r}" fill="none" stroke="#1e293b" stroke-width="12" />`;
+  let legendHtml = '';
+
+  categories.forEach(cat => {
+    const pct = (cat.val / grandTotal) * 100;
+    const dashArray = (cat.val / grandTotal) * circumference;
+    const dashOffset = -accumulatedOffset;
+
+    if (cat.val > 0) {
+      svgContent += `
+        <circle cx="50" cy="50" r="${r}" fill="none" 
+          stroke="${cat.color}" 
+          stroke-width="12" 
+          stroke-dasharray="${dashArray} ${circumference - dashArray}" 
+          stroke-dashoffset="${dashOffset}" 
+          class="transition-all duration-500 hover:opacity-80 cursor-pointer" />
+      `;
+      accumulatedOffset += dashArray;
+    }
+
+    legendHtml += `
+      <div class="flex items-center justify-between px-2 py-1.5 rounded-lg border ${cat.bgClass} text-[10px] sm:text-xs font-bold shadow-sm min-w-0">
+        <div class="flex items-center gap-1.5 min-w-0">
+          <span class="w-2 h-2 sm:w-2.5 sm:h-2.5 rounded-full shrink-0" style="background-color: ${cat.color};"></span>
+          <span class="truncate">${cat.short}</span>
+        </div>
+        <span class="ml-1 shrink-0 font-extrabold">${cat.val} Jam <span class="text-[8px] sm:text-[9px] opacity-75">(${Math.round(pct)}%)</span></span>
+      </div>
+    `;
+  });
+  
+  legendHtml += `
+    <div class="flex items-center justify-between px-2 py-1.5 mt-1 rounded-lg border bg-orange-950/30 text-orange-400 border-orange-500/30 text-[10px] sm:text-xs font-bold shadow-sm min-w-0">
+      <div class="flex items-center gap-1.5 min-w-0">
+        <i class="fa-solid fa-clock-rotate-left shrink-0"></i>
+        <span class="truncate">Guru Terlambat</span>
+      </div>
+      <span class="ml-1 shrink-0 font-extrabold">${totalGuruTelat} Orang</span>
+    </div>
+  `;
+
+  svgContainer.innerHTML = svgContent;
+  legendContainer.innerHTML = legendHtml;
+}
+
+function syncCalendarView() {
+  const mVal = document.getElementById('header-month').value;
+  const yVal = parseInt(document.getElementById('header-year').value);
+  const monthIdx = INDO_MONTHS_MAP[mVal];
+
+  const today = new Date();
+  const currentDay = today.getDate();
+  const currentMonth = today.getMonth();
+  const currentYear = today.getFullYear();
+
+  document.getElementById('calendar-widget-title').innerText = `${mVal} ${yVal}`;
+  
+  const bTitle = document.getElementById('bisyaroh-header-title');
+  if (bTitle) {
+    bTitle.innerText = `Rekap Bisyaroh Bulan ${mVal}`;
+  }
+
+  const printPeriod = document.getElementById('print-rekap-period');
+  if (printPeriod) {
+    printPeriod.innerText = `${mVal.toUpperCase()} ${yVal}`;
+  }
+  
+  const daysInMonth = new Date(yVal, monthIdx + 1, 0).getDate();
+  const firstDayIdx = new Date(yVal, monthIdx, 1).getDay();
+
+  const daysContainer = document.getElementById('calendar-days-container');
+  daysContainer.innerHTML = '';
+
+  for (let i = 0; i < firstDayIdx; i++) {
+    const emptyCell = document.createElement('span');
+    emptyCell.className = "py-1.5 text-transparent select-none";
+    emptyCell.innerText = "-";
+    daysContainer.appendChild(emptyCell);
+  }
+
+  for (let day = 1; day <= daysInMonth; day++) {
+    const dayCell = document.createElement('span');
+    
+    if (day === currentDay && monthIdx === currentMonth && yVal === currentYear) {
+      dayCell.className = "py-1 bg-violet-600 text-white rounded-full font-black shadow-md shadow-violet-600/50 text-center text-[10px] block";
+    } else {
+      dayCell.className = "py-1 font-bold text-slate-300 text-center text-[10px] block transition-all";
+    }
+    
+    dayCell.innerText = day;
+    daysContainer.appendChild(dayCell);
+  }
+
+  refreshAllData();
+  updateRapatStatistics();
+}
+
+function renderTeacherList(data) {
+  const tbody = document.getElementById('guru-table-body');
+  tbody.innerHTML = '';
+  
+  data.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.className = "hover:bg-white/5 transition-all";
+    
+    const tdName = document.createElement('td');
+    tdName.className = "py-2 font-bold text-white";
+    tdName.innerText = item.guru;
+    tr.appendChild(tdName);
+    
+    const tdId = document.createElement('td');
+    tdId.className = "py-2";
+    const spanId = document.createElement('span');
+    spanId.className = "block text-violet-400 font-bold";
+    spanId.innerText = item.id;
+    const spanWa = document.createElement('span');
+    spanWa.className = "text-[9px] text-slate-400 font-semibold";
+    spanWa.innerText = item.wa || '-';
+    tdId.appendChild(spanId);
+    tdId.appendChild(spanWa);
+    tr.appendChild(tdId);
+    
+    const tdBank = document.createElement('td');
+    tdBank.className = "py-2 text-slate-300";
+    tdBank.innerText = (item.bank || 'BCA') + "\n";
+    const spanRek = document.createElement('span');
+    spanRek.className = "text-[9px] text-slate-400";
+    spanRek.innerText = item.rekening || '-';
+    tdBank.appendChild(spanRek);
+    tr.appendChild(tdBank);
+    
+    const tdJam = document.createElement('td');
+    tdJam.className = "py-2 text-center font-black text-violet-400";
+    tdJam.innerText = (item.jamPerpekanMaster || item.jamPerpekan || 0) + " Jam";
+    tr.appendChild(tdJam);
+    
+    const tdAksi = document.createElement('td');
+    tdAksi.className = "py-2 text-center";
+    
+    const divAksi = document.createElement('div');
+    divAksi.className = "flex items-center justify-center gap-1.5";
+    
+    const btnQR = document.createElement('button');
+    btnQR.className = "text-cyan-400 border border-cyan-500/30 bg-cyan-950/30 px-2 py-1 rounded-md hover:bg-cyan-600 hover:text-white transition-all font-bold text-[10px] flex items-center gap-1";
+    btnQR.title = "Lihat QR Code";
+    btnQR.innerHTML = '<i class="fa-solid fa-qrcode"></i> QR';
+    btnQR.onclick = function() { showQRModal(item.id); };
+    divAksi.appendChild(btnQR);
+    
+    const btnEdit = document.createElement('button');
+    btnEdit.className = "text-violet-400 border border-violet-500/30 bg-violet-950/30 px-2.5 py-1 rounded-md hover:bg-violet-600 hover:text-white transition-all font-bold text-[10px] flex items-center gap-1";
+    btnEdit.innerHTML = '<i class="fa-solid fa-edit"></i> Edit';
+    btnEdit.onclick = function() { triggerEditTeacher(item.id); };
+    divAksi.appendChild(btnEdit);
+    
+    const btnHapus = document.createElement('button');
+    btnHapus.className = "text-rose-400 border border-rose-500/30 bg-rose-950/30 px-2.5 py-1 rounded-md hover:bg-rose-600 hover:text-white transition-all font-bold text-[10px] flex items-center gap-1";
+    btnHapus.innerHTML = '<i class="fa-solid fa-trash"></i> Hapus';
+    btnHapus.onclick = function() { confirmDeleteTeacher(item.id); };
+    divAksi.appendChild(btnHapus);
+    
+    tdAksi.appendChild(divAksi);
+    tr.appendChild(tdAksi);
+    
+    tbody.appendChild(tr);
+  });
+}
+
+function renderSettingsJamPerpekanTable(data) {
+  const tbody = document.getElementById('set-perpekan-guru-body');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+
+  data.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.className = "hover:bg-white/5 transition-all";
+    tr.innerHTML = `
+      <td class="py-1.5 text-white">
+        <span>${item.guru}</span>
+        <span class="text-[9px] text-violet-400 font-bold block">(${item.id})</span>
+      </td>
+      <td class="py-1.5 text-right">
+        <input type="number" id="set-jam-guru-${item.id}" value="${item.jamPerpekanMaster || item.jamPerpekan || 0}" class="w-16 bg-[#1e293b] border border-white/10 rounded-lg px-2 py-1 text-right text-xs font-black text-violet-400 focus:outline-none focus:border-violet-500">
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function saveBulkJamPerpekan() {
+  const listGuruToUpdate = [];
+  globalDatabase.forEach(item => {
+    const inputElem = document.getElementById(`set-jam-guru-${item.id}`);
+    if (inputElem) {
+      const val = Number(inputElem.value) || 0;
+      item.jamPerpekanMaster = val;
+      item.jamPerpekan = val;
+      listGuruToUpdate.push({ id: item.id, jamPerpekan: val });
+    }
+  });
+
+  localStorage.setItem('mdu_db_cache', JSON.stringify(globalDatabase));
+  renderAllTablesAndCharts();
+  showToast("Jam Perpekan seluruh guru berhasil disimpan!");
+
+  callGasApi('bulkSaveJamPerpekan', { listGuru: listGuruToUpdate })
+    .then(res => {
+      if (!res.success) showToast("Gagal update jam di sheets: " + res.error);
+    })
+    .catch(err => console.error(err));
+}
+
+function saveMasterGuru() {
+  const id = document.getElementById('g-id').value.trim();
+  const nama = document.getElementById('g-nama').value.trim();
+  const bank = document.getElementById('g-bank').value.trim();
+  const rekening = document.getElementById('g-rekening').value.trim();
+  const wa = document.getElementById('g-wa').value.trim();
+  const jamPerpekan = Number(document.getElementById('g-perpekan').value) || 0;
+
+  if (!id || !nama) {
+    showToast("ID dan Nama Guru wajib diisi!");
+    return;
+  }
+
+  const payload = { id, nama, bank, rekening, wa, jamPerpekan, status: "Aktif" };
+
+  const matchIdx = globalDatabase.findIndex(d => d.id === id);
+  if (matchIdx !== -1) {
+    globalDatabase[matchIdx].guru = nama;
+    globalDatabase[matchIdx].bank = bank;
+    globalDatabase[matchIdx].rekening = rekening;
+    globalDatabase[matchIdx].wa = wa;
+    globalDatabase[matchIdx].jamPerpekanMaster = jamPerpekan;
+    globalDatabase[matchIdx].jamPerpekan = jamPerpekan;
+  } else {
+    globalDatabase.push({
+      id, guru: nama, bank, rekening, wa, jamPerpekanMaster: jamPerpekan, jamPerpekan: jamPerpekan, jamMengajar: 0, jumlahHadir: 0, sakit: 0, izin: 0, alpa: 0, piket: 0, rapat: 0, telat: 0, totalBisyaroh: 0, persentaseHadir: "0%", status: "Belum Dibayar"
+    });
+  }
+  
+  localStorage.setItem('mdu_db_cache', JSON.stringify(globalDatabase));
+  renderAllTablesAndCharts();
+  resetTeacherForm();
+  showToast("Master Guru berhasil disimpan!");
+
+  callGasApi('saveMasterGuru', payload)
+    .then(res => {
+      if (!res.success) showToast("Sync Error: " + res.error);
+    })
+    .catch(err => console.error(err));
+}
+
+function triggerEditTeacher(id) {
+  const match = globalDatabase.find(d => d.id === id);
+  if (match) {
+    document.getElementById('g-id').value = match.id;
+    document.getElementById('g-nama').value = match.guru;
+    document.getElementById('g-bank').value = match.bank || 'BCA';
+    document.getElementById('g-rekening').value = match.rekening || '';
+    document.getElementById('g-wa').value = match.wa || '';
+    document.getElementById('g-perpekan').value = match.jamPerpekanMaster || match.jamPerpekan || 0;
+    showToast("Data guru siap diedit di formulir!");
+  }
+}
+
+function resetTeacherForm() {
+  document.getElementById('g-id').value = '';
+  document.getElementById('g-nama').value = '';
+  document.getElementById('g-bank').value = 'BCA';
+  document.getElementById('g-rekening').value = '';
+  document.getElementById('g-wa').value = '';
+  document.getElementById('g-perpekan').value = '';
+}
+
+function confirmDeleteTeacher(id) {
+  const match = globalDatabase.find(g => g.id === id);
+  if(!match) return;
+  const name = match.guru;
+
+  const modal = document.getElementById('mdu-confirm-modal');
+  const content = document.getElementById('mdu-modal-content');
+  const icon = document.getElementById('mdu-modal-icon');
+
+  icon.className = "fa-solid fa-triangle-exclamation text-rose-500 text-2xl";
+  document.getElementById('mdu-modal-title').innerText = "Hapus Master Guru";
+  document.getElementById('mdu-modal-body').innerText = `Apakah Anda yakin ingin menghapus data guru ${name} (${id})? Seluruh rekaman kehadiran dan bisyaroh guru ini akan terhapus secara permanen.`;
+  
+  modal.classList.remove('hidden');
+  setTimeout(() => {
+    modal.classList.remove('opacity-0');
+    content.classList.remove('translate-y-4');
+  }, 50);
+
+  document.getElementById('mdu-modal-confirm').className = "flex-1 bg-rose-600 hover:bg-rose-500 text-white font-bold py-2.5 px-3 rounded-xl text-xs shadow-md transition-all";
+  document.getElementById('mdu-modal-confirm').onclick = function() {
+    closeCustomModal();
+    executeTeacherDeletion(id, name);
+  };
+
+  document.getElementById('mdu-modal-cancel').onclick = function() {
+    closeCustomModal();
+  };
+}
+
+function executeTeacherDeletion(id, name) {
+  const idx = globalDatabase.findIndex(d => d.id === id);
+  if (idx !== -1) {
+    globalDatabase.splice(idx, 1);
+  }
+
+  localStorage.setItem('mdu_db_cache', JSON.stringify(globalDatabase));
+  renderAllTablesAndCharts();
+  showToast(`Data guru ${name} berhasil dihapus!`);
+
+  callGasApi('deleteTeacher', { id: id })
+    .then(res => {
+      if (!res.success) {
+        showToast("Gagal hapus di Sheets: " + res.error);
+      } else {
+        refreshAllData();
+      }
+    })
+    .catch(err => console.error(err));
+}
+
+function loadTeacherStats(val) {
+  if(!val) {
+    document.getElementById('in-jam-perpekan').value = "";
+    document.getElementById('in-jam-mengajar').value = "";
+    document.getElementById('in-sakit').value = "0";
+    document.getElementById('in-izin').value = "0";
+    document.getElementById('in-alpa').value = "0";
+    document.getElementById('in-piket').value = "0";
+    document.getElementById('in-rapat').value = "0";
+    document.getElementById('in-telat').value = "0";
+    liveCalculate();
+    return;
+  }
+  const id = val.split('|')[0];
+  const match = globalDatabase.find(d => d.id === id);
+  if(match) {
+    document.getElementById('in-jam-perpekan').value = match.jamPerpekanMaster || match.jamPerpekan || 0;
+    document.getElementById('in-jam-mengajar').value = match.jamMengajar || 0;
+    document.getElementById('in-sakit').value = match.sakit || 0;
+    document.getElementById('in-izin').value = match.izin || 0;
+    document.getElementById('in-alpa').value = match.alpa || 0;
+    document.getElementById('in-piket').value = match.piket || 0;
+    document.getElementById('in-rapat').value = match.rapat || 0;
+    document.getElementById('in-telat').value = match.telat || 0;
+  }
+  liveCalculate();
+}
+
+function liveCalculate() {
+  const jamMengajar = Number(document.getElementById('in-jam-mengajar').value) || 0;
+  const sakit = Number(document.getElementById('in-sakit').value) || 0;
+  const izin = Number(document.getElementById('in-izin').value) || 0;
+  const alpa = Number(document.getElementById('in-alpa').value) || 0;
+  const piket = Number(document.getElementById('in-piket').value) || 0;
+  const rapat = Number(document.getElementById('in-rapat').value) || 0;
+  const telat = Number(document.getElementById('in-telat').value) || 0;
+
+  let baseHadir = jamMengajar - (sakit + izin + alpa);
+  if (baseHadir < 0) baseHadir = 0;
+  const totalHadir = baseHadir + piket;
+
+  let pct = "0%";
+  if (jamMengajar > 0) {
+    pct = calculateFormattedPercentage(totalHadir, jamMengajar);
+  }
+
+  const dendaRapat = rapat * 25000;
+  const dendaTelat = telat * (appSettings.tarifTelat || 7000);
+  let bisyaroh = (totalHadir * appSettings.tarifHadir) + (sakit * appSettings.tarifSakit) - dendaRapat - dendaTelat;
+  if (bisyaroh < 0) bisyaroh = 0;
+
+  document.getElementById('live-hadir-val').innerText = `${totalHadir} Jam`;
+  document.getElementById('live-persentase-val').innerText = pct;
+  document.getElementById('live-bisyaroh-val').innerText = "Rp " + bisyaroh.toLocaleString('id-ID');
+}
+
+function submitAttendance() {
+  const selectVal = document.getElementById('in-guru-select').value;
+  if (!selectVal) {
+    showToast("Silakan pilih guru!");
+    return;
+  }
+
+  const [id, guruName] = selectVal.split('|');
+  const bulan = document.getElementById('header-month').value;
+  const tahun = document.getElementById('header-year').value;
+
+  const jamMengajar = Number(document.getElementById('in-jam-mengajar').value) || 0;
+  const sakit = Number(document.getElementById('in-sakit').value) || 0;
+  const izin = Number(document.getElementById('in-izin').value) || 0;
+  const alpa = Number(document.getElementById('in-alpa').value) || 0;
+  const piket = Number(document.getElementById('in-piket').value) || 0;
+  const rapat = Number(document.getElementById('in-rapat').value) || 0;
+  const telat = Number(document.getElementById('in-telat').value) || 0;
+
+  let baseHadir = jamMengajar - (sakit + izin + alpa);
+  if (baseHadir < 0) baseHadir = 0;
+  const totalH = baseHadir + piket;
+
+  const dendaRapat = rapat * 25000;
+  const dendaTelat = telat * (appSettings.tarifTelat || 7000);
+  let calBisyaroh = (totalH * appSettings.tarifHadir) + (sakit * appSettings.tarifSakit) - dendaRapat - dendaTelat;
+  if (calBisyaroh < 0) calBisyaroh = 0;
+
+  const payload = {
+    id: id,
+    guru: guruName,
+    bulan: bulan,
+    tahun: tahun,
+    jamPerpekan: Number(document.getElementById('in-jam-perpekan').value) || 0,
+    jamMengajar: jamMengajar,
+    sakit: sakit,
+    izin: izin,
+    alpa: alpa,
+    piket: piket,
+    rapat: rapat,
+    telat: telat,
+    status: "Belum Dibayar"
+  };
+
+  const idx = globalDatabase.findIndex(d => d.id === id);
+
+  const calculatedRecord = {
+    ...payload,
+    jamPerpekanMaster: globalDatabase[idx] ? globalDatabase[idx].jamPerpekanMaster : payload.jamPerpekan,
+    jumlahHadir: totalH,
+    totalBisyaroh: calBisyaroh,
+    persentaseHadir: jamMengajar > 0 ? calculateFormattedPercentage(totalH, jamMengajar) : "0%"
+  };
+
+  if (idx !== -1) {
+    calculatedRecord.status = globalDatabase[idx].status || "Belum Dibayar";
+    globalDatabase[idx] = calculatedRecord;
+  } else {
+    globalDatabase.push(calculatedRecord);
+  }
+
+  localStorage.setItem('mdu_db_cache', JSON.stringify(globalDatabase));
+  renderAllTablesAndCharts();
+  showToast(`Kehadiran & Bisyaroh ${guruName} berhasil disimpan!`);
+
+  callGasApi('saveKehadiran', payload)
+    .then(res => {
+      if (!res.success) showToast("Gagal Sinkronisasi: " + res.error);
+    })
+    .catch(err => console.error(err));
+}
+
+function renderInputTable(data) {
+  const tbody = document.getElementById('preview-kehadiran-body');
+  tbody.innerHTML = '';
+  
+  data.forEach(item => {
+    const tr = document.createElement('tr');
+    tr.className = "hover:bg-white/5 transition-all";
+    
+    const tdName = document.createElement('td');
+    tdName.className = "py-2";
+    const spanName = document.createElement('span');
+    spanName.className = "font-bold text-white block";
+    spanName.innerText = item.guru;
+    const spanId = document.createElement('span');
+    spanId.className = "text-[9px] text-slate-400 font-bold uppercase";
+    spanId.innerText = item.id;
+    tdName.appendChild(spanName);
+    tdName.appendChild(spanId);
+    tr.appendChild(tdName);
+    
+    const tdPekan = document.createElement('td');
+    tdPekan.className = "py-2 text-center text-slate-300 font-bold";
+    tdPekan.innerText = item.jamPerpekan + " jam";
+    tr.appendChild(tdPekan);
+    
+    const tdAjar = document.createElement('td');
+    tdAjar.className = "py-2 text-center text-slate-300";
+    tdAjar.innerText = item.jamMengajar + " jam";
+    tr.appendChild(tdAjar);
+    
+    const tdDetail = document.createElement('td');
+    tdDetail.className = "py-2 text-center font-bold text-[11px]";
+    tdDetail.innerHTML = `
+      <span class="text-emerald-400">${item.jumlahHadir}</span>
+      <span class="text-slate-600">/</span>
+      <span class="text-amber-400">${item.sakit}</span>
+      <span class="text-slate-600">/</span>
+      <span class="text-violet-400">${item.izin}</span>
+      <span class="text-slate-600">/</span>
+      <span class="text-red-400">${item.alpa}</span>
+      <span class="text-slate-600">/</span>
+      <span class="text-emerald-400 font-black">+${item.piket || 0}</span>
+      <span class="text-slate-600">/</span>
+      <span class="text-rose-400 font-black">-${item.rapat || 0}</span>
+      <span class="text-slate-600">/</span>
+      <span class="text-orange-400 font-black">-${item.telat || 0}</span>
+    `;
+    tr.appendChild(tdDetail);
+    
+    const tdAct = document.createElement('td');
+    tdAct.className = "py-2 text-center";
+    const btnEdit = document.createElement('button');
+    btnEdit.className = "text-violet-400 hover:bg-violet-600 hover:text-white border border-violet-500/30 px-2.5 py-1 rounded-md text-[10px] font-bold transition-all";
+    btnEdit.innerText = "Edit";
+    btnEdit.onclick = function() { triggerEditInput(item.id); };
+    tdAct.appendChild(btnEdit);
+    tr.appendChild(tdAct);
+    
+    tbody.appendChild(tr);
+  });
+}
+
+function renderBisyarohTable(data) {
+  const tbody = document.getElementById('bisyaroh-table-body');
+  tbody.innerHTML = '';
+  let grandTotal = 0;
+
+  data.forEach(item => {
+    const totalBisyarohVal = Number(item.totalBisyaroh) || 0;
+    grandTotal += totalBisyarohVal;
+    const isPaid = item.status === "Sudah Dibayar";
+
+    const tr = document.createElement('tr');
+    tr.className = "hover:bg-white/5 transition-all text-xs border-b border-white/5";
+    
+    const tdName = document.createElement('td');
+    tdName.className = "py-2 pr-3 font-bold";
+    tdName.innerHTML = `<span class="font-extrabold text-white block print:inline print:text-black">${item.guru}</span><span class="text-[9px] text-violet-400 font-bold uppercase block print:inline print:ml-1 print:text-[8px] print:text-black">(${item.id})</span>`;
+    tr.appendChild(tdName);
+    
+    tr.innerHTML += `
+      <td class="py-2 text-center px-1.5 text-slate-300 font-medium print:text-black">${item.jamPerpekan}</td>
+      <td class="py-2 text-center px-1.5 text-slate-300 font-medium print:text-black">${item.jamMengajar}</td>
+      <td class="py-2 text-center px-1.5 text-violet-400 font-extrabold print:text-black">${item.jumlahHadir}</td>
+      <td class="py-2 text-center px-1.5 text-amber-400 font-bold print:text-black">${item.sakit}</td>
+      <td class="py-2 text-center px-1.5 text-violet-300 font-bold print:text-black">${item.izin}</td>
+      <td class="py-2 text-center px-1.5 text-red-400 font-bold print:text-black">${item.alpa}</td>
+      <td class="py-2 text-center px-1.5 text-emerald-400 font-extrabold print:text-black">${item.piket > 0 ? item.piket : '0'}</td>
+      <td class="py-2 text-center px-1.5 text-rose-400 font-extrabold print:text-black">${item.rapat > 0 ? item.rapat : '0'}</td>
+      <td class="py-2 text-center px-1.5 text-orange-400 font-extrabold print:text-black">${item.telat > 0 ? item.telat : '0'}</td>
+      <td class="py-2 text-right px-1.5 text-emerald-400 font-black text-xs print:text-black">Rp ${totalBisyarohVal.toLocaleString('id-ID')}</td>
+      <td class="py-2 text-center px-1.5 text-white font-black print:text-black">${item.persentaseHadir}</td>
+    `;
+    
+    const tdStatus = document.createElement('td');
+    tdStatus.className = "py-2 text-center px-1.5 print:hidden";
+    tdStatus.innerHTML = isPaid 
+      ? `<span class="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 px-2 py-0.5 rounded-full text-[9px] font-black uppercase">Sudah Dibayar</span>`
+      : `<span class="bg-amber-500/10 border border-amber-500/30 text-amber-400 px-2 py-0.5 rounded-full text-[9px] font-black uppercase">Belum Dibayar</span>`;
+    tr.appendChild(tdStatus);
+    
+    const tdAct = document.createElement('td');
+    tdAct.className = "py-2 text-center pl-3 print:hidden flex items-center justify-center gap-1.5";
+    
+    if (isPaid) {
+        const btnLunas = document.createElement('button');
+        btnLunas.disabled = true;
+        btnLunas.className = "bg-[#1e293b] text-slate-500 px-2.5 py-1 rounded-lg text-[10px] font-bold border border-white/5 cursor-not-allowed";
+        btnLunas.innerHTML = '<i class="fa-solid fa-check"></i> Lunas';
+        tdAct.appendChild(btnLunas);
+    } else {
+        const btnBayar = document.createElement('button');
+        btnBayar.className = "bg-violet-500/10 text-violet-400 hover:bg-violet-600 hover:text-white px-3 py-1 rounded-lg text-[10px] font-bold border border-violet-500/30 transition-all";
+        btnBayar.innerText = "Bayar";
+        btnBayar.onclick = function() { confirmAndPay(item.id); };
+        tdAct.appendChild(btnBayar);
+    }
+    
+    const btnShare = document.createElement('button');
+    btnShare.className = "text-slate-400 hover:text-emerald-400 border border-white/10 p-1.5 rounded-lg hover:bg-emerald-500/10 transition-all";
+    btnShare.innerHTML = '<i class="fa-regular fa-comment-dots text-xs"></i>';
+    btnShare.onclick = function() { shareWhatsApp(item.id); };
+    tdAct.appendChild(btnShare);
+    
+    tr.appendChild(tdAct);
+    tbody.appendChild(tr);
+  });
+
+  const tfoot = document.getElementById('bisyaroh-table-foot');
+  if (tfoot) {
+    tfoot.innerHTML = `
+      <tr class="bg-emerald-500/10 text-emerald-400 font-black border-t-2 border-emerald-500 print:bg-slate-100 print:text-black">
+        <td colspan="10" class="py-2 px-3 text-right uppercase tracking-wider text-xs font-black print:text-black">TOTAL:</td>
+        <td class="py-2 px-1.5 text-right text-xs text-emerald-300 font-black print:text-black">Rp ${grandTotal.toLocaleString('id-ID')}</td>
+        <td class="py-2 px-1.5"></td>
+        <td class="py-2 px-1.5 print:hidden"></td>
+        <td class="py-2 px-1.5 print:hidden"></td>
+      </tr>
+    `;
+  }
+}
+
+function exportToExcel() {
+  if (typeof XLSX === 'undefined') {
+    showToast("Library Excel sedang dimuat, coba sebentar lagi.");
+    return;
+  }
+
+  const bulan = document.getElementById('header-month').value;
+  const tahun = document.getElementById('header-year').value;
+  
+  const excelRows = [];
+
+  excelRows.push(["", "", "", "", appSettings.namaLembaga.toUpperCase()]);
+  excelRows.push(["", "", "", "", appSettings.alamatLembaga]);
+  excelRows.push([]);
+  
+  excelRows.push(["", "", "", "", "LAPORAN REKAP BISYAROH GURU"]);
+  excelRows.push(["", "", "", "", `${bulan.toUpperCase()} ${tahun}`]);
+  excelRows.push([]);
+
+  excelRows.push([
+    "ID GURU",
+    "NAMA GURU",
+    "PERPEKAN",
+    "JAM MENGAJAR",
+    "HADIR",
+    "SAKIT",
+    "IZIN",
+    "ALPA",
+    "PIKET",
+    "RAPAT",
+    "TELAT",
+    "TOTAL BISYAROH",
+    "PERSENTASE"
+  ]);
+
+  let grandTotalBisyaroh = 0;
+
+  globalDatabase.forEach(item => {
+    const totalBis = Number(item.totalBisyaroh) || 0;
+    grandTotalBisyaroh += totalBis;
+
+    excelRows.push([
+      item.id,
+      item.guru,
+      item.jamPerpekan || 0,
+      item.jamMengajar || 0,
+      item.jumlahHadir || 0,
+      item.sakit || 0,
+      item.izin || 0,
+      item.alpa || 0,
+      item.piket || 0,
+      item.rapat || 0,
+      item.telat || 0,
+      totalBis,
+      item.persentaseHadir || "0%"
+    ]);
+  });
+
+  excelRows.push([
+    "", "TOTAL :", "", "", "", "", "", "", "", "", "", grandTotalBisyaroh, ""
+  ]);
+
+  excelRows.push([]);
+  excelRows.push([]);
+
+  excelRows.push(["", "", "", "", "MENGETAHUI :"]);
+  excelRows.push([]);
+  excelRows.push(["", "Sekretaris Madrasah", "", "", "", "", "", "", "Bendahara Madrasah"]);
+  excelRows.push(["", appSettings.namaLembaga, "", "", "", "", "", "", appSettings.namaLembaga]);
+  excelRows.push([]);
+  excelRows.push([]);
+  excelRows.push(["", appSettings.namaSekretaris, "", "", "", "", "", "", appSettings.namaBendahara]);
+  excelRows.push([]);
+  excelRows.push(["", "Wakil Kepala Madrasah", "", "", "", "", "", "", "Kepala Madrasah"]);
+  excelRows.push(["", appSettings.namaLembaga, "", "", "", "", "", "", appSettings.namaLembaga]);
+  excelRows.push([]);
+  excelRows.push([]);
+  excelRows.push(["", appSettings.namaWakamad, "", "", "", "", "", "", appSettings.namaKamad]);
+  excelRows.push([]);
+  excelRows.push([]);
+  excelRows.push(["", "", "", "", "MENGESAHKAN :"]);
+  excelRows.push(["", "", "", "", "Pimpinan dan Pengasuh Pondok Pesantren"]);
+  excelRows.push(["", "", "", "", appSettings.namaLembaga]);
+  excelRows.push([]);
+  excelRows.push([]);
+  excelRows.push(["", "", "", "", appSettings.namaPimpinan]);
+
+  const ws = XLSX.utils.aoa_to_sheet(excelRows);
+  
+  ws['!cols'] = [
+    { wch: 15 }, { wch: 30 }, { wch: 12 }, { wch: 15 },
+    { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 10 },
+    { wch: 10 }, { wch: 10 }, { wch: 10 }, { wch: 20 }, { wch: 15 }
+  ];
+  
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, `Bisyaroh_${bulan}_${tahun}`);
+  XLSX.writeFile(wb, `Laporan_Bisyaroh_${bulan}_${tahun}.xlsx`);
+
+  showToast("Laporan Rekap Bisyaroh berhasil diekspor ke Excel!");
+}
+
+function renderIndisiplinerTable(data) {
+  const tbody = document.getElementById('indisipliner-table-body');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  
+  let no = 1;
+  let hasData = false;
+
+  data.forEach(item => {
+    const alpa = Number(item.alpa) || 0;
+    const telat = Number(item.telat) || 0;
+    const jamMengajar = Number(item.jamMengajar) || 0;
+    
+    let pctTelat = 0;
+    if (jamMengajar > 0) {
+      pctTelat = (telat / jamMengajar) * 100;
+    }
+
+    let keterangan = "";
+    let severity = 0; 
+    let alasan = [];
+
+    if (alpa >= 8) {
+      severity = 4; keterangan = "Pemutusan Hubungan Kerja"; alasan.push(`Alpa ${alpa} Kali`);
+    } else if (alpa >= 6) {
+      severity = 3; keterangan = "SP 2"; alasan.push(`Alpa ${alpa} Kali`);
+    } else if (alpa >= 4) {
+      severity = 2; keterangan = "SP 1"; alasan.push(`Alpa ${alpa} Kali`);
+    } else if (alpa > 0) {
+      severity = 1; keterangan = "Teguran Lisan"; alasan.push(`Alpa ${alpa} Kali`);
+    }
+
+    if (pctTelat >= 35) {
+      if (severity < 2) { severity = 2; keterangan = "SP 1"; }
+      alasan.push(`Telat ${telat}x (${Math.round(pctTelat)}%)`);
+    }
+
+    if (severity > 0) {
+      hasData = true;
+      const tr = document.createElement('tr');
+      tr.className = "hover:bg-white/5 transition-all text-xs border-b border-white/5";
+      
+      let badgeClass = "bg-cyan-500/10 text-cyan-400 border-cyan-500/30"; 
+      if (severity === 2) badgeClass = "bg-amber-500/10 text-amber-400 border-amber-500/30"; 
+      if (severity === 3) badgeClass = "bg-orange-500/10 text-orange-400 border-orange-500/30"; 
+      if (severity === 4) badgeClass = "bg-rose-500/10 text-rose-400 border-rose-500/30"; 
+
+      tr.innerHTML = `
+        <td class="py-2.5 px-3 text-slate-400 font-medium text-center">${no++}</td>
+        <td class="py-2.5 px-3 font-bold text-violet-400">${item.id}</td>
+        <td class="py-2.5 px-3 font-extrabold text-white">${item.guru}</td>
+        <td class="py-2.5 px-3 text-center text-orange-400 font-bold">${telat}</td>
+        <td class="py-2.5 px-3 text-center text-red-400 font-bold">${alpa}</td>
+        <td class="py-2.5 px-3">
+          <div class="flex flex-col items-start gap-1">
+            <span class="px-2 py-0.5 rounded-md border ${badgeClass} text-[10px] font-black uppercase tracking-wider">${keterangan}</span>
+            <span class="text-[9px] text-slate-400 font-medium">${alasan.join(' & ')}</span>
+          </div>
+        </td>
+      `;
+      tbody.appendChild(tr);
+    }
+  });
+
+  if (!hasData) {
+    tbody.innerHTML = `<tr><td colspan="6" class="py-6 text-center text-slate-500 text-xs font-bold italic">Tidak ada data guru yang melanggar indisipliner bulan ini.</td></tr>`;
+  }
+}
+
+function exportIndisiplinerToExcel() {
+  if (typeof XLSX === 'undefined') {
+    showToast("Library Excel sedang dimuat, coba sebentar lagi.");
+    return;
+  }
+
+  const bulan = document.getElementById('header-month').value;
+  const tahun = document.getElementById('header-year').value;
+  
+  const excelRows = [];
+  excelRows.push(["", "LAPORAN INDISIPLINER GURU"]);
+  excelRows.push(["", `${bulan.toUpperCase()} ${tahun}`]);
+  excelRows.push([]);
+  
+  excelRows.push(["NO", "ID GURU", "NAMA GURU", "TELAT", "ALPA", "KETERANGAN", "DETAIL ALASAN"]);
+
+  let no = 1;
+  globalDatabase.forEach(item => {
+    const alpa = Number(item.alpa) || 0;
+    const telat = Number(item.telat) || 0;
+    const jamMengajar = Number(item.jamMengajar) || 0;
+    
+    let pctTelat = 0;
+    if (jamMengajar > 0) {
+      pctTelat = (telat / jamMengajar) * 100;
+    }
+
+    let keterangan = "";
+    let severity = 0; 
+    let alasan = [];
+
+    if (alpa >= 8) {
+      severity = 4; keterangan = "Pemutusan Hubungan Kerja"; alasan.push(`Alpa ${alpa} Kali`);
+    } else if (alpa >= 6) {
+      severity = 3; keterangan = "SP 2"; alasan.push(`Alpa ${alpa} Kali`);
+    } else if (alpa >= 4) {
+      severity = 2; keterangan = "SP 1"; alasan.push(`Alpa ${alpa} Kali`);
+    } else if (alpa > 0) {
+      severity = 1; keterangan = "Teguran Lisan"; alasan.push(`Alpa ${alpa} Kali`);
+    }
+
+    if (pctTelat >= 35) {
+      if (severity < 2) { severity = 2; keterangan = "SP 1"; }
+      alasan.push(`Telat ${telat}x (${Math.round(pctTelat)}%)`);
+    }
+
+    if (severity > 0) {
+      excelRows.push([no++, item.id, item.guru, telat, alpa, keterangan, alasan.join(' & ')]);
+    }
+  });
+
+  if (no === 1) {
+      excelRows.push(["", "Tidak ada data guru yang melanggar indisipliner bulan ini."]);
+  }
+
+  const ws = XLSX.utils.aoa_to_sheet(excelRows);
+  ws['!cols'] = [{ wch: 5 }, { wch: 15 }, { wch: 30 }, { wch: 10 }, { wch: 10 }, { wch: 25 }, { wch: 35 }];
+  
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, `Indisipliner_${bulan}_${tahun}`);
+  XLSX.writeFile(wb, `Laporan_Indisipliner_${bulan}_${tahun}.xlsx`);
+  showToast("Laporan Indisipliner berhasil diekspor!");
+}
+
+function triggerEditInput(id) {
+  switchMenu('input');
+  const match = globalDatabase.find(d => d.id === id);
+  if(match) {
+    document.getElementById('in-guru-select').value = `${match.id}|${match.guru}`;
+    loadTeacherStats(`${match.id}|${match.guru}`);
+  }
+  showToast("Data guru berhasil dimuat di panel input!");
+}
+
+// BUGFIX Bawaan ZettBOT: Menambahkan logic asli executePayment yang hilang di file sebelumnya.
+function executePayment(id, bulan, tahun) {
+  const matchIdx = globalDatabase.findIndex(d => d.id === id);
+  if (matchIdx !== -1) {
+    globalDatabase[matchIdx].status = "Sudah Dibayar";
+  }
+  
+  localStorage.setItem('mdu_db_cache', JSON.stringify(globalDatabase));
+  renderAllTablesAndCharts();
+  showToast("Pembayaran berhasil dicatat lunas secara lokal!");
+
+  callGasApi('updateStatusBayar', { id: id, bulan: bulan, tahun: tahun })
+    .then(res => {
+      if (!res.success) showToast("Gagal update status di Sheets: " + res.error);
+    })
+    .catch(err => console.error(err));
+}
+
+function confirmAndPay(id) {
+  const match = globalDatabase.find(g => g.id === id);
+  if (!match) return;
+  const name = match.guru;
+  
+  const modal = document.getElementById('mdu-confirm-modal');
+  const content = document.getElementById('mdu-modal-content');
+  const icon = document.getElementById('mdu-modal-icon');
+  const bulan = document.getElementById('header-month').value;
+  const tahun = document.getElementById('header-year').value;
+
+  icon.className = "fa-solid fa-circle-question text-violet-400 text-2xl";
+  document.getElementById('mdu-modal-title').innerText = "Konfirmasi Pembayaran Bisyaroh";
+  document.getElementById('mdu-modal-body').innerText = `Konfirmasi pelunasan upah bisyaroh Ust/Ustadzah ${name} untuk periode ${bulan} ${tahun}?`;
+  
+  modal.classList.remove('hidden');
+  setTimeout(() => {
+    modal.classList.remove('opacity-0');
+    content.classList.remove('translate-y-4');
+  }, 50);
+
+  document.getElementById('mdu-modal-confirm').className = "flex-1 bg-violet-600 hover:bg-violet-500 text-white font-bold py-2.5 px-3 rounded-xl text-xs shadow-md shadow-violet-600/30 transition-all";
+  document.getElementById('mdu-modal-confirm').onclick = function() {
+    closeCustomModal();
+    executePayment(id, bulan, tahun);
+  };
+
+  document.getElementById('mdu-modal-cancel').onclick = function() {
+    closeCustomModal();
+  };
+}
+
+function closeCustomModal() {
+  const modal = document.getElementById('mdu-confirm-modal');
+  const content = document.getElementById('mdu-modal-content');
+  modal.classList.add('opacity-0');
+  content.classList.add('translate-y-4');
+  setTimeout(() => { modal.classList.add('hidden'); }, 300);
+}
+
+function updateSettingsData() {
+  const payload = {
+    namaLembaga: document.getElementById('set-nama-lembaga').value,
+    alamatLembaga: document.getElementById('set-alamat-lembaga').value,
+    namaAdmin: document.getElementById('set-nama-admin').value,
+    inisialAdmin: document.getElementById('set-inisial-admin').value,
+    logoUrl: document.getElementById('set-logo-url').value,
+    fotoAdminUrl: document.getElementById('set-foto-admin-url').value,
+    tarifHadir: Number(document.getElementById('set-tarif-hadir').value) || 22500,
+    tarifSakit: Number(document.getElementById('set-tarif-sakit').value) || 11250,
+    tarifTelat: Number(document.getElementById('set-tarif-telat').value) || 7000,
+    namaSekretaris: document.getElementById('set-nama-sekretaris').value,
+    namaBendahara: document.getElementById('set-nama-bendahara').value,
+    namaWakamad: document.getElementById('set-nama-wakamad').value,
+    namaKamad: document.getElementById('set-nama-kamad').value,
+    namaPimpinan: document.getElementById('set-nama-pimpinan').value
+  };
+
+  appSettings = payload;
+  localStorage.setItem('mdu_settings_cache', JSON.stringify(appSettings));
+  syncSettingsToUI(appSettings);
+  recalculateAllBisyarohInMemory();
+  renderAllTablesAndCharts();
+  showToast("Parameter pengaturan institusi berhasil disimpan!");
+
+  callGasApi('saveSettings', payload)
+    .then(res => {
+      if (!res.success) showToast("Gagal sinkronisasi pengaturan ke Sheets: " + res.error);
+    })
+    .catch(err => console.error(err));
+}
+
+function setupDatabaseBackend() {
+  callGasApi('setupDatabase')
+    .then(() => {
+      showToast("Database Relasional Sukses Terbentuk!");
+      refreshAllData();
+    })
+    .catch(err => console.error(err));
+}
+
+function shareWhatsApp(id) {
+  const item = globalDatabase.find(d => d.id === id);
+  if (!item) return;
+
+  const bulan = document.getElementById('header-month').value;
+  const tahun = document.getElementById('header-year').value;
+
+  const messageContent = 
+    `Assalamu'alaikum Wr. Wb.\n` +
+    `Yth. ${item.guru}\n\n` +
+    `Alhamdulillah, berikut kami sampaikan Bisyaroh Khidmah periode *${bulan} ${tahun}*:\n\n` +
+    `*Total Bisyaroh Diterima: Rp ${Number(item.totalBisyaroh).toLocaleString('id-ID')}*\n\n` +
+    `Jazakumullah khairan katsiran atas segala dedikasi, keikhlasan, dan pengabdian Ustadz di *${appSettings.namaLembaga}*.\n\n` +
+    `Semoga setiap lelah menjadi ibadah dan ilmu yang disampaikan menjadi amal jariyah.\n\n` +
+    `_Ingat selalu perbaiki niat dalam berkhidmah, semoga Lillah karena Allah SWT._\n\n` +
+    `Wassalamu'alaikum Wr. Wb.\n\n` +
+    `Hormat kami,\n\n` +
+    `*Sekretaris Madrasah*`;
+
+  const text = encodeURIComponent(messageContent);
+  window.open(`https://api.whatsapp.com/send?text=${text}`, '_blank');
+}
+
+function showToast(msg) {
+  const toast = document.getElementById('toast-notif');
+  document.getElementById('toast-text').innerText = msg;
+  
+  toast.classList.remove('translate-y-20', 'opacity-0');
+  toast.classList.add('translate-y-0', 'opacity-100');
+  
+  setTimeout(() => {
+    toast.classList.add('translate-y-20', 'opacity-0');
+    toast.classList.remove('translate-y-0', 'opacity-100');
+  }, 3500);
+}
+
+function showQRModal(id) {
+  const match = globalDatabase.find(g => g.id === id);
+  if(!match) return;
+  const nama = match.guru;
+  const wa = match.wa || '';
+
+  const modal = document.getElementById('qr-modal');
+  const content = document.getElementById('qr-modal-content');
+  const qrImage = document.getElementById('qr-image');
+  
+  document.getElementById('qr-guru-nama').innerText = nama + " (" + id + ")";
+  
+  const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${id}`;
+  qrImage.src = qrUrl;
+  
+  const btnShare = document.getElementById('btn-share-qr');
+  btnShare.onclick = function() {
+    if(!wa || wa.trim() === "") {
+      showToast("Nomor WA guru ini belum didaftarkan!");
+      return;
+    }
+    const msg = `Assalamu'alaikum, Yth. ${nama}.\n\nBerikut adalah tautan QR Code Absensi ID Anda:\n\n${qrUrl}\n\nHarap simpan kode ini untuk absensi rapat ke depannya. Terima kasih.`;
+    window.open(`https://api.whatsapp.com/send?phone=${wa}&text=${encodeURIComponent(msg)}`, '_blank');
+  };
+
+  const btnDownload = document.getElementById('btn-download-qr');
+  btnDownload.onclick = function() {
+    fetch(qrUrl)
+      .then(response => response.blob())
+      .then(blob => {
+        const blobUrl = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = blobUrl;
+        a.download = `QRCode-${id}-${nama.replace(/\s+/g, '_')}.png`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(blobUrl);
+        showToast("QR Code berhasil di-download!");
+      })
+      .catch(err => {
+        showToast("Gagal mendownload QR Code");
+        console.error(err);
+      });
+  };
+
+  modal.classList.remove('hidden');
+  setTimeout(() => {
+    modal.classList.remove('opacity-0');
+    content.classList.remove('scale-95');
+  }, 50);
+}
+
+function closeQRModal() {
+  const modal = document.getElementById('qr-modal');
+  const content = document.getElementById('qr-modal-content');
+  modal.classList.add('opacity-0');
+  content.classList.add('scale-95');
+  setTimeout(() => { modal.classList.add('hidden'); }, 300);
+}
+
+// --- LOGIKA SCANNER & ABSENSI RAPAT BERDASARKAN BULAN AKTIF ---
+let html5QrCodeScanner = null;
+
+function startScanner() {
+  const scannerContainerId = "qr-reader-container";
+  if (html5QrCodeScanner) {
+    try { html5QrCodeScanner.clear(); } catch(e){}
+  }
+
+  html5QrCodeScanner = new Html5Qrcode(scannerContainerId);
+  const config = { fps: 10, qrbox: { width: 220, height: 220 } };
+
+  html5QrCodeScanner.start(
+    { facingMode: "environment" }, 
+    config, 
+    onScanSuccess,
+    onScanFailure
+  ).catch(err => {
+    showToast("Izin Kamera Ditolak / Diblokir Browser.");
+    console.warn("QR Start error = ", err);
+  });
+}
+
+function stopScanner() {
+  if (html5QrCodeScanner) {
+    html5QrCodeScanner.stop().then(() => {
+      html5QrCodeScanner.clear();
+      showToast("Kamera Scan Dihentikan.");
+    }).catch(err => {
+      console.warn("Failed to clear scanner. ", err);
+    });
+  }
+}
+
+function onScanSuccess(decodedText, decodedResult) {
+  const cleanedId = decodedText.trim();
+  const matchTeacher = globalDatabase.find(g => g.id === cleanedId);
+  const namaRapat = document.getElementById('scan-nama-rapat').value.trim() || "Rapat Rutin";
+  const currentMonth = document.getElementById('header-month').value;
+  const currentYear = document.getElementById('header-year').value;
+
+  if (matchTeacher) {
+    const alreadyAbsented = attendanceLogsToday.some(log => log.id === cleanedId && log.bulan === currentMonth && log.tahun === currentYear);
+    if (alreadyAbsented) {
+      showToast(`Guru ${matchTeacher.guru} sudah tercatat hadir bulan ${currentMonth} ini!`);
+    } else {
+      showToast(`Absen Berhasil: ${matchTeacher.guru} (${cleanedId})`);
+      const timeNow = new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      
+      attendanceLogsToday.unshift({ 
+        id: cleanedId, 
+        guru: matchTeacher.guru, 
+        waktu: timeNow,
+        bulan: currentMonth,
+        tahun: currentYear,
+        agenda: namaRapat
+      });
+
+      renderScanLogUI();
+      updateRapatStatistics();
+
+      callGasApi('saveAbsensiRapat', { idGuru: cleanedId, namaGuru: matchTeacher.guru, namaRapat: namaRapat, bulan: currentMonth, tahun: currentYear })
+        .then(res => {
+          if (!res.success) console.warn("Log rapat cloud: " + res.error);
+        })
+        .catch(err => console.error(err));
+    }
+  } else {
+    showToast(`QR Terbaca (${cleanedId}), tetapi ID Guru tidak terdaftar!`);
+  }
+}
+
+function onScanFailure(error) {
+  // Silent scanning error frame
+}
+
+function renderScanLogUI() {
+  const tbody = document.getElementById('scan-log-body');
+  const currentMonth = document.getElementById('header-month').value;
+  const currentYear = document.getElementById('header-year').value;
+  
+  tbody.innerHTML = '';
+  
+  const filteredLogs = attendanceLogsToday.filter(log => log.bulan === currentMonth && log.tahun === currentYear);
+
+  if (filteredLogs.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="4" class="py-4 text-center text-[10px] text-slate-500 italic">Belum ada data scan periode ${currentMonth} ${currentYear}.</td></tr>`;
+    return;
+  }
+
+  filteredLogs.forEach(log => {
+    const tr = document.createElement('tr');
+    tr.className = "hover:bg-white/5 transition-all";
+    tr.innerHTML = `
+      <td class="py-2.5 font-extrabold text-white text-[10px]">${log.waktu}</td>
+      <td class="py-2.5 text-cyan-400 font-bold">${log.id}</td>
+      <td class="py-2.5 text-white font-bold">${log.guru}</td>
+      <td class="py-2.5 text-right">
+        <span class="bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2 py-0.5 rounded-md text-[9px] font-black uppercase">Hadir</span>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function updateRapatStatistics() {
+  const totalGuru = globalDatabase.length;
+  const currentMonth = document.getElementById('header-month').value;
+  const currentYear = document.getElementById('header-year').value;
+  
+  const activeLogs = attendanceLogsToday.filter(log => log.bulan === currentMonth && log.tahun === currentYear);
+  const totalHadir = activeLogs.length;
+  let totalBelum = totalGuru - totalHadir;
+  if (totalBelum < 0) totalBelum = 0;
+
+  const elTotal = document.getElementById('stat-total-guru');
+  const elHadir = document.getElementById('stat-hadir-guru');
+  const elBelum = document.getElementById('stat-tidak-hadir-guru');
+
+  if (elTotal) elTotal.innerText = totalGuru;
+  if (elHadir) elHadir.innerText = totalHadir;
+  if (elBelum) elBelum.innerText = totalBelum;
+
+  renderScanLogUI();
+}
+
+function showAttendanceRecapModal() {
+  const modal = document.getElementById('attendance-recap-modal');
+  const content = document.getElementById('attendance-recap-content');
+  const agendaName = document.getElementById('scan-nama-rapat').value.trim() || "Rapat Rutin";
+  const currentMonth = document.getElementById('header-month').value;
+  const currentYear = document.getElementById('header-year').value;
+  
+  document.getElementById('recap-agenda-subtitle').innerText = `Agenda: ${agendaName} (${currentMonth} ${currentYear})`;
+  
+  const tbodyHadir = document.getElementById('recap-table-hadir');
+  const tbodyBelum = document.getElementById('recap-table-belum');
+  
+  tbodyHadir.innerHTML = '';
+  tbodyBelum.innerHTML = '';
+
+  const activeLogs = attendanceLogsToday.filter(log => log.bulan === currentMonth && log.tahun === currentYear);
+  const presentIds = activeLogs.map(item => item.id);
+  
+  document.getElementById('recap-count-hadir').innerText = activeLogs.length;
+  let belumCount = 0;
+
+  if (activeLogs.length === 0) {
+    tbodyHadir.innerHTML = `<tr><td colspan="2" class="py-3 text-center text-slate-500 italic text-[11px]">Belum ada guru yang hadir</td></tr>`;
+  } else {
+    activeLogs.forEach(log => {
+      const tr = document.createElement('tr');
+      tr.className = "hover:bg-white/5 transition-all text-xs";
+      tr.innerHTML = `
+        <td class="py-2 px-3 text-white font-bold">${log.guru} <span class="text-violet-400 text-[10px]">(${log.id})</span></td>
+        <td class="py-2 px-3 text-right flex items-center justify-end gap-2">
+          <span class="text-emerald-400 font-extrabold">${log.waktu}</span>
+          <button onclick="cancelAttendance('${log.id}')" title="Batalkan Kehadiran" class="bg-rose-500/10 hover:bg-rose-600 text-rose-400 hover:text-white border border-rose-500/30 p-1 rounded transition-all text-[10px]">
+            <i class="fa-solid fa-trash-can"></i> Hapus
+          </button>
+        </td>
+      `;
+      tbodyHadir.appendChild(tr);
+    });
+  }
+
+  globalDatabase.forEach(teacher => {
+    if (!presentIds.includes(teacher.id)) {
+      belumCount++;
+      const tr = document.createElement('tr');
+      tr.className = "hover:bg-white/5 transition-all text-xs";
+      tr.innerHTML = `
+        <td class="py-2 px-3 text-slate-300 font-bold">${teacher.guru} <span class="text-violet-400 text-[10px]">(${teacher.id})</span></td>
+        <td class="py-2 px-3 text-right"><span class="bg-amber-500/10 text-amber-400 border border-amber-500/30 px-2 py-0.5 rounded text-[9px] font-bold uppercase">Belum Hadir</span></td>
+      `;
+      tbodyBelum.appendChild(tr);
+    }
+  });
+
+  document.getElementById('recap-count-belum').innerText = belumCount;
+
+  if (belumCount === 0) {
+    tbodyBelum.innerHTML = `<tr><td colspan="2" class="py-3 text-center text-emerald-400 italic text-[11px]">Semua guru telah hadir!</td></tr>`;
+  }
+
+  modal.classList.remove('hidden');
+  setTimeout(() => {
+    modal.classList.remove('opacity-0');
+    content.classList.remove('scale-95');
+  }, 50);
+}
+
+function cancelAttendance(id) {
+  const currentMonth = document.getElementById('header-month').value;
+  const currentYear = document.getElementById('header-year').value;
+
+  const idx = attendanceLogsToday.findIndex(log => log.id === id && log.bulan === currentMonth && log.tahun === currentYear);
+  if (idx !== -1) {
+    const removed = attendanceLogsToday.splice(idx, 1)[0];
+    showToast(`Kehadiran ${removed.guru} dibatalkan.`);
+    updateRapatStatistics();
+    showAttendanceRecapModal(); // Refresh modal
+  }
+}
+
+function closeAttendanceRecapModal() {
+  const modal = document.getElementById('attendance-recap-modal');
+  const content = document.getElementById('attendance-recap-content');
+  modal.classList.add('opacity-0');
+  content.classList.add('scale-95');
+  setTimeout(() => { modal.classList.add('hidden'); }, 300);
+}

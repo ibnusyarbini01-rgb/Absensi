@@ -1,0 +1,174 @@
+body {
+background-color: #0b1120;
+color: #f8fafc;
+-webkit-tap-highlight-color: transparent;
+font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+.mdu-card {
+background: #151c2e;
+border-radius: 1.25rem;
+box-shadow: 0 10px 30px -5px rgba(0, 0, 0, 0.5), 0 4px 12px -2px rgba(0, 0, 0, 0.3);
+border: 1px solid rgba(255, 255, 255, 0.08);
+backdrop-filter: blur(16px);
+}
+
+.sidebar-link {
+transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+color: #94a3b8;
+}
+
+.sidebar-link:hover {
+color: #ffffff;
+background: rgba(255, 255, 255, 0.05);
+}
+
+.sidebar-active {
+background: linear-gradient(135deg, #8b5cf6 0%, #6366f1 100%) !important;
+color: #ffffff !important;
+box-shadow: 0 8px 20px -4px rgba(139, 92, 246, 0.5);
+}
+
+#bisyaroh-table-body tr:nth-child(even) {
+background-color: rgba(255, 255, 255, 0.02);
+}
+
+::-webkit-scrollbar {
+width: 5px;
+height: 5px;
+}
+::-webkit-scrollbar-track {
+background: #0b1120;
+}
+::-webkit-scrollbar-thumb {
+background: #334155;
+border-radius: 10px;
+}
+
+input, select, textarea {
+color-scheme: dark;
+}
+
+/* Fix dropdown option visibility */
+select option {
+background-color: #151c2e !important;
+color: #ffffff !important;
+padding: 8px 12px;
+}
+
+@media print {
+@page {
+size: A4 portrait;
+margin: 3mm 4mm 3mm 4mm !important;
+}
+
+html, body {
+background-color: #ffffff !important;
+color: #000000 !important;
+padding: 0 !important;
+margin: 0 !important;
+zoom: 75% !important;
+}
+
+aside, header, footer, .no-print, .print:hidden, #login-container, #mobile-nav-bar {
+display: none !important;
+}
+
+main {
+width: 100% !important;
+padding: 0 !important;
+margin: 0 !important;
+}
+
+.mdu-card {
+background: #ffffff !important;
+border: none !important;
+box-shadow: none !important;
+border-radius: 0 !important;
+padding: 0 !important;
+margin: 0 !important;
+color: #000000 !important;
+}
+
+#menu-section-bisyaroh {
+margin: 0 !important;
+padding: 0 !important;
+}
+
+#menu-section-bisyaroh > :not([hidden]) ~ :not([hidden]) {
+margin-top: 4px !important;
+}
+
+table {
+width: 100% !important;
+table-layout: auto !important;
+border-collapse: collapse !important;
+margin-bottom: 2px !important;
+color: #000000 !important;
+}
+
+#bisyaroh-table-body tr:nth-child(even) {
+background-color: #f8fafc !important;
+-webkit-print-color-adjust: exact;
+print-color-adjust: exact;
+}
+
+th {
+font-size: 11px !important;
+background-color: #f1f5f9 !important;
+color: #1e293b !important;
+-webkit-print-color-adjust: exact;
+print-color-adjust: exact;
+border-bottom: 2px solid #cbd5e1 !important;
+padding: 1px 2px !important;
+}
+
+td {
+font-size: 12px !important;
+padding: 0px 2px !important;
+line-height: 1.0 !important;
+border-bottom: 1px solid #cbd5e1 !important;
+color: #334155 !important;
+}
+
+tfoot td {
+font-size: 11px !important;
+padding: 1px 2px !important;
+}
+
+#print-instansi-logo {
+width: 40px !important;
+height: 40px !important;
+object-fit: contain !important;
+}
+
+#print-instansi-title {
+font-size: 15px !important;
+color: #000000 !important;
+}
+
+.print-sign-text {
+color: #000000 !important;
+}
+
+.print-sign-sub {
+color: #475569 !important;
+}
+
+.print-border-dash {
+border-color: #64748b !important;
+}
+
+.font-black, .font-extrabold {
+font-weight: 700 !important;
+color: #000000 !important;
+}
+
+.page-break-inside-avoid {
+page-break-inside: avoid !important;
+break-inside: avoid !important;
+margin-top: 4px !important;
+padding-top: 2px !important;
+border-top: 1px solid #cbd5e1 !important;
+}
+}
